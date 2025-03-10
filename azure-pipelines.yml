@@ -1,0 +1,87 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  ACR_NAME: 'myacrresgistrycicd'
+  IMAGE_NAME: 'flask-app'
+  TAG: '$(Build.BuildId)'
+  VM_NAME: 'az-devops'
+  RESOURCE_GROUP: 'DevOpsResourceGroup'
+
+steps:
+# Step 1: Fetch Secrets from Azure Key Vault 
+- task: AzureKeyVault@2
+  inputs:
+    azureSubscription: 'Azure-DevOps-Connection'
+    KeyVaultName: 'AzureKeyVault-CICD'
+    SecretsFilter: '*'
+    
+# Step 2: SSH into VM and build & push Docker image
+- task: SSH@0
+  inputs:
+    sshEndpoint: 'ssh-endpoint-service-conn'  
+    runOptions: 'commands'
+    commands: |
+      echo "Logging in to Azure..."
+      az login --service-principal -u $(servicePrincipalId) -p $(servicePrincipalSecret) --tenant $(tenantId)
+      echo "Login successful!"
+      echo "Building Docker image..."
+      sudo docker build -t $myacrresgistrycicd.azurecr.io/flask-app:$(TAG) .
+      echo "Pushing Docker image to ACR..."
+      sudo docker push myacrresgistrycicd.azurecr.io/flask-app:$(TAG)
+  displayName: 'Build and Push Docker Image from VM'
+  
+# Step 3: Run unit tests 
+- script: |
+    pip install -r requirements.txt
+    pip install pytest
+  displayName: 'Install Dependencies'
+
+- script: pytest tests/
+  displayName: 'Run Unit Tests'
+
+# Step 4: SonarQube Analysis
+- task: SonarQubePrepare@4
+  inputs:
+    SonarQube: 'Azure-SonarQube-Service-Connection'
+    scannerMode: 'CLI'
+    configMode: 'manual'
+    cliProjectKey: 'Azure-CI-CD-Project'
+    cliProjectName: 'Azure CI CD Demo'
+    cliProjectVersion: '1.0'
+
+- script: sonar-scanner
+  displayName: 'Run SonarQube Analysis'
+
+# Step 6: Deployment to Azure Web Apps
+stages:
+- stage: Dev
+  jobs:
+  - deployment: DeployDev
+    environment: 'Dev'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: |
+              az webapp config container set --name CICD-AzureProject-Dev --resource-group devopsresourcegroup --docker-custom-image-name myacrresgistrycicd.azurecr.io/flask-app:$(Build.BuildId)
+            displayName: 'Deploy to Dev'
+
+- stage: Staging
+  jobs:
+  - deployment: DeployStaging
+    environment: 'Staging'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: |
+              az webapp config container set --name CICD-AzureProject-Staging --resource-group devopsresourcegroup --docker-custom-image-name myacrresgistrycicd.azurecr.io/flask-app:$(Build.BuildId
+            displayName: 'Deploy to Staging'
+    dependsOn: Dev
+    condition: succeeded()
